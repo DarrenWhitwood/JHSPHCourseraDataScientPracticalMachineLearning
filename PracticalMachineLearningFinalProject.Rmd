@@ -1,0 +1,121 @@
+---
+title: "Practical Machine Learning Final Project"
+author: "Darren Whitwood"
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    df_print: paged
+---
+
+# Predictive Model For Exercise Data
+
+# Executive Summary
+
+In this report, we will develop a model for predicting which activity was performed based on the other columns in the data from Groupware \@ LES found here: <http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har>
+
+We will clean the data, perform some exploratory analysis, and then train a GBM model which we will then validate against 20% of the data set aside at the outset. Based on this model predicting with over 95% accuracy, we will conclude that this is a powerful model that can be used to predict the testing cells (20 rows of data that are a separate part of the assignment and not reported on here).
+
+# Getting and Cleaning the Data
+
+First read the data from the CSV files.
+
+```{r cache=TRUE}
+suppressMessages(library(caret))
+suppressMessages(library(dplyr))
+
+pml.testing <- read.csv("pml-testing.csv")
+pml.training <- read.csv("pml-training.csv")
+```
+
+When looking at the data at a high level, two things jump out. First, the first 7 columns are administrative data; it's possible that the user, timestamp, and other data here correlates with the activity but the fact that a certain test subject did activity A more often has no predictive power for the general population of wearable tech users. Second, a very large percentage of the data is NA.
+
+Hence we will remove the first 7 columns, but also while we are at it, let's remove all of the "stddev" columns as well. The reader may verify that all isntances of a "stddev" column are next to a corresponding "var" column but not vice versa, so nothing is lost from removing these columns, as variance and standard deviation are each a function of the other.
+
+```{r results="hold", cache=TRUE}
+names(pml.training[1:7])
+columnsToRemove <- c(1:7)
+pml.training <- pml.training[-columnsToRemove] %>% 
+    select(-contains("stddev"))
+```
+
+```{r results="hold", cache=TRUE, warning=FALSE}
+# By converting all columns besides the 'classe' at the right end, blanks and
+# divide by 0 are coerced to NA.
+pml.training[-c(length(pml.training))] <-
+  pml.training[-c(length(pml.training))] %>% mutate_if(is.character, as.numeric)
+pml.training[-c(length(pml.training))] <-
+  pml.training[-c(length(pml.training))] %>% mutate_if(is.integer, as.numeric)
+
+sum(is.na(pml.training)) / (nrow(pml.training)*ncol(pml.training))
+```
+
+The simplest interpretation of the NA values is that they represent a motion being irrelevant to the activity that the person is performing. That is the same as having a 0 value for all columns, or at least that is a workable assumption that will play out in the prediction power of the model.
+
+```{r cache=TRUE}
+pml.training[is.na(pml.training)] <- 0
+```
+
+As a result we want to explore how the NA values are distributed. The following exploratory plot shows how there is a clear divide where some activities have values for nearly every row and others for very few rows. We will tentatively remove the columns that are NA for most rows, recognizing that on the one hand there might be a clear division where there is a correlation between the columns that have many (or few) NA values with certain activities but on the other hand that we might still have sufficient predicting power without them.
+
+```{r echo=FALSE, cache=TRUE}
+plot(1:length(pml.training), colSums(pml.training != 0), xlab="Column Number", ylab="Count of non-NA Values", main="Non-NA Values by Column")
+```
+
+The way we will implement this is to create a new data frame that removes columns that are more than 2.5% NA values. There is significant wiggle room for the factor given the divide in the middle of the above plot.
+
+```{r cache=TRUE}
+pml.training.trim <- pml.training[, colSums(pml.training != 0) > 0.025 * nrow(pml.training)]
+```
+
+The last preparatory step is to divide the data into training and validation, since we have such a small test set (20 rows) that does not have correct answers to test against. Using the convention of 60/40 for training/validation, we partition as follows:
+
+```{r cache=TRUE}
+set.seed(2023-3-23)
+inTrainig <- createDataPartition(pml.training.trim$classe, p = 3/5)[[1]]
+pml.validation.trim <- pml.training.trim[-inTrainig,]
+pml.training.trim <- pml.training.trim[inTrainig,]
+```
+
+#Model Creation
+
+Let's take stock of our data objects now.
+
+```{r cache=TRUE}
+dim(pml.validation.trim)
+dim(pml.training.trim)
+```
+
+With 53 columns, that means 52 predictors for a training set of 9421 rows. A single tree with so many predictors would help tell a story, at least at the top branches of the tree, and would be good for interpretation. However, this data set is still small enough to use a more sophisticated method, and the loss of explanatory power is minimal because a tree with so many variables will always be hard to interpret anyway. Rather than compromise by selecting fewer columns, we'll use gradient boosting so that all 52 predictors can be preserved and the observations can be systematically weighted.
+
+```{r cache=TRUE}
+gbm <- train(classe ~ ., method="gbm", data=pml.training.trim, verbose=FALSE)
+```
+
+\newpage
+
+To validate this model we can create a confusion matrix on the training data.
+
+```{r cache=TRUE}
+pred.train <- predict(gbm, pml.training.trim)
+cm.train <- confusionMatrix(pred.train, as.factor(pml.training.trim$classe))
+cm.train
+```
+
+The 97.64% accuracy on the training data is excellent, indicating that we have a model that can reliably predict the activity type. Having settled on a model, we predict on the 40% of original rows that were set aside for validation, to measure the predictive power on new data. \newpage
+
+```{r cache=TRUE}
+pred <- predict(gbm, pml.validation.trim)
+cm <- confusionMatrix(pred, as.factor(pml.validation.trim$classe))
+cm
+```
+
+# Conclusion
+
+The above confusion matrix indicates 96.44% accuracy for this model, which is sufficient to pass a reasonable 95% accuracy target. Thus a GBM on the selected columns using the methodology detailed in this report produces a viable model to predict the activity level for future scenarios. This accuracy can be interpreted as the out-of-sample error will be 1-.9644 = 3.56%.
+
+Using this model we can predict the 20 test cells:
+
+```{r cache=TRUE}
+predFinal <- predict(gbm, pml.testing)
+predFinal
+```
